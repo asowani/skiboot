@@ -1,0 +1,21 @@
+.. _interrupts:
+
+Interrupts
+==========
+
+OPAL does not directly handle *any* interrupts. The running Operating System
+is in complete control. OPAL will provide the OS with a list of interrupts that
+need to be serviced by firmware, but it is up to the OS to make the appropriate
+OPAL call to handle them in a timely fashion.
+
+The host OS must pass all interrupts in the `opal-interrupts` property of
+:ref:`device-tree/ibm,opal` in the device tree to OPAL. It does this using the
+:ref:`opal-handle-interrupt` OPAL call.
+
+For details on the interrupt controller, see :ref:`xive`.
+
+.. toctree::
+   :maxdepth: 2
+   :glob:
+
+   *

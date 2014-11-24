@@ -1,0 +1,151 @@
+Hypervisor Maintenance Interrupts (HMI)
+=======================================
+
+When a Hypervisor Maintenance Interrupt (HMI) occurs, the Hypervisor
+Maintenance Exception Register (HMER) is set with the cause for that interrupt.
+Of this 64bit register, all but 3 bits are implementation specific.
+Thus, to enable operating systems to be portable, firmware is involved
+in handling the HMI.
+
+See :ref:`opal-hmi-message`.
+
+ Basic logic is, Linux gets the interrupt, works out it's a HMI, and
+ calls OPAL_HANDLE_HMI to decode/handle the HMI event(s). Linux will then get
+ information about the HMIs for logging purposes (if we recovered okay)
+ or to help work out how fatal it is.
+
+ e.g. we may log "Hey, recovered from some error in the CAPP unit".
+ We may also get "This core checkstopped and it's not coming back".
+
+ Currently, linux accepts that anything fatal is fatal to itself.
+ In the future, we *could* Linux survive NX checkstop, or even a core
+ checkstop. The only thing stopping either of those is time and sanity of
+ kernel developers (not to mention test teams).
+
+ In the event of something being marked as fatal, the idea is that Linux
+ will, through an OPAL call (OPAL_CEC_REBOOT2) say that a fatal platform
+ error has occured that it can only deal with by having firmware gather
+ debug data and reboot the box (it does a reboot_type of
+ OPAL_REBOOT_PLATFORM_ERROR).
+
+ This maps down to that PBEASTFIR[31]. We get this fir to trigger from
+ Hostboot (via device-tree on p8 and hdat on p9), so it could be
+ anything, OPAL doesn't care.
+
+ It *used* to be that Linux would just reboot the box, but this didn't
+ tell PRD (or OPAL) that it should gather debug data, and that didn't
+ help anybody in debugging anything, nor calling out a failing processor,
+ and that's why the OPAL_REBOOT_PLATFORM_ERROR reboot type was
+ introduced.
+
+ As such, the logic in the kernel *used* to be:
+
+ if (fatal_hmi)
+   reboot();
+
+ but as of ~2015 sometime it's closer to this:
+
+ if (fatal_hmi) {
+   if (opal_cec_reboot2(OPAL_REBOOT_PLATFORM_ERROR))
+       print "Reboot type not supported"
+
+   reboot();
+ }
+
+ and with https://patchwork.ozlabs.org/patch/875910/
+ it'll be panic() rather than reboot(), which makes a lot of sense and
+ has me wondering why we didn't always do that.
+
+ panic() behaviour is up to system policy. Typically, for production systems,
+ this is set to "reboot in 60 seconds on panic" while for developers,
+ it's likely "enter kernel debugger" (which for powerpc is xmon)... or it
+ could be "try to then do kdump". No matter what, you're not continuing
+ normal execution of your OS.
+
+ But, since we ended up in a position where we were getting fatal HMIs and
+ what we were gathering on that reboot cycle wasn't enough to go on, we
+ took a big hammer to the problem and disabled the
+ OPAL_REBOOT_PLATFORM_ERROR call.
+
+ This is currently an nvram option, so you can re-enable the xstop with:
+ nvram -p ibm,skiboot --update-config opal-sw-xstop=enable
+
+ I rather reluctantly merged this change as it doesn't really make sense
+ to change this for everything, and it doesn't solve the problem of "no,
+ really, a reboot needs to happen to collect FIR bits to work out why
+ this thing is broken".
+
+ So, I want a better solution for GA, I'm just not 100% sure what that
+ looks like yet (maybe we need a new type of HMI to tell linux
+ that it was "fatal but probably the operating system's fault" ?)
+
+ One of the current problems we have is that there's no way to
+ distinguish between what is a hardware/firmware problem and what is
+ caused by the OS being buggy. If we had had that from the start, we
+ wouldn't have been having any of these problems.
+
+ > However, I'm not clear on the details.
+ >    Will OPAL ever drive a system checkstop (PBEASTFIR[31]) for either
+ >    NPU0FIR[19] or [25] ?
+
+ *current* behaviour is that if there's any bits that match:
+ fatal_errors = npu2_fir & ~npu2_fir_mask & npu2_fir_action0 &
+ npu2_fir_action1;
+ for any NPU, then we tell linux about the NPU HMI.
+
+ (i haven't checked what those maskes are set to by default though... but
+ let's *assume* that it does include np0fir[19] and [25])
+
+ *currently* we *always* tell linux it's a RECOVERABLE HMI, so we don't
+ go down the TI path. This only became the case *very* recently though
+ (skiboot v5.10-rc2) and prior to that we didn't decode the NPU2
+ checkstop reason at all, so just assumed it was fatal (and thus we *did*
+ go down the TI path).
+
+ So the *current* answer to your question is: no.
+
+ For everything prior to skiboot v5.10-rc2, the answer is yes.
+
+ I'm also not convinced that saying 'recoverable' is really correct... it
+ smells like more of a hack to me. This is something we need to go back
+ and design properly inside OPAL and Linux.
+
+ >    What conditions remain for which OPAL would drive checkstop / PBEASTFIR
+ >    [31] ?
+
+ Currently? None at all.
+
+ This is not what I want for GA though.
+
+ > Put differently, I am concerned that if we make the PRD change suggested
+ > above and if OPAL can drive checkstop for either of these two bits, that
+ > we'll be back to where we were before 1742Ex when we had OPAL TI checkstops
+ > and no idea why.
+
+ After the insanely long explanation above... I think the safe way to
+ proceed forward on this is:
+
+ - Current skiboot does what you want, it won't trigger PBEASTFIR[31] no
+   matter what.
+
+ - To protect against future changes, we probably need to take note of
+   this and take action in OPAL depending what route we end up going down
+   with changes to OPAL to make things less hacky then they are today.
+
+ Does that help at all?
+
+
+
+  There's two places:
+ 1) We'll print something to the OPAL log which *probably* (not on FSP
+    systems, but on OpenPOWER systems it will get there with some level of
+    detail) will get to the console of the machine.
+ 2) The kernel will log something to the kernel log which (assuming the
+    world hasn't just stopped), will get to syslog. This may also get
+    into the 'lnx-oops' nvram partition if we end up panic()ing.
+
+ The kernel log looks something like:
+  <3> Severe Hypervisor Maintenance Interrupt [Not recovered]
+  <3> Error detail: Malfunction Alert
+  <3> HMER: XXXXXXX
+  <3> TFMR: XXXXXXX

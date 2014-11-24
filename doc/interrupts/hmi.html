@@ -1,0 +1,239 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Hypervisor Maintenance Interrupts (HMI) &#8212; skiboot v5.10-56-gee04c92cd15e-stewart-dirty-f7c5431
+ documentation</title>
+    <link rel="stylesheet" href="../_static/classic.css" type="text/css" />
+    <link rel="stylesheet" href="../_static/pygments.css" type="text/css" />
+    <script type="text/javascript">
+      var DOCUMENTATION_OPTIONS = {
+        URL_ROOT:    '../',
+        VERSION:     'v5.10-56-gee04c92cd15e-stewart-dirty-f7c5431',
+        COLLAPSE_INDEX: false,
+        FILE_SUFFIX: '.html',
+        HAS_SOURCE:  true,
+        SOURCELINK_SUFFIX: '.txt'
+      };
+    </script>
+    <script type="text/javascript" src="../_static/jquery.js"></script>
+    <script type="text/javascript" src="../_static/underscore.js"></script>
+    <script type="text/javascript" src="../_static/doctools.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="OPAL API Documentation" href="../opal-api/index.html" />
+    <link rel="prev" title="Interrupts" href="index.html" /> 
+  </head>
+  <body>
+    <div class="related" role="navigation" aria-label="related navigation">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="../genindex.html" title="General Index"
+             accesskey="I">index</a></li>
+        <li class="right" >
+          <a href="../opal-api/index.html" title="OPAL API Documentation"
+             accesskey="N">next</a> |</li>
+        <li class="right" >
+          <a href="index.html" title="Interrupts"
+             accesskey="P">previous</a> |</li>
+        <li class="nav-item nav-item-0"><a href="../index.html">skiboot v5.10-56-gee04c92cd15e-stewart-dirty-f7c5431
+ documentation</a> &#187;</li>
+          <li class="nav-item nav-item-1"><a href="index.html" accesskey="U">Interrupts</a> &#187;</li> 
+      </ul>
+    </div>  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <div class="section" id="hypervisor-maintenance-interrupts-hmi">
+<h1>Hypervisor Maintenance Interrupts (HMI)<a class="headerlink" href="#hypervisor-maintenance-interrupts-hmi" title="Permalink to this headline">¶</a></h1>
+<p>When a Hypervisor Maintenance Interrupt (HMI) occurs, the Hypervisor
+Maintenance Exception Register (HMER) is set with the cause for that interrupt.
+Of this 64bit register, all but 3 bits are implementation specific.
+Thus, to enable operating systems to be portable, firmware is involved
+in handling the HMI.</p>
+<p>See <a class="reference internal" href="../opal-api/opal-messages.html#opal-hmi-message"><span class="std std-ref">OPAL_MSG_HMI_EVT</span></a>.</p>
+<blockquote>
+<div><p>Basic logic is, Linux gets the interrupt, works out it’s a HMI, and
+calls OPAL_HANDLE_HMI to decode/handle the HMI event(s). Linux will then get
+information about the HMIs for logging purposes (if we recovered okay)
+or to help work out how fatal it is.</p>
+<p>e.g. we may log “Hey, recovered from some error in the CAPP unit”.
+We may also get “This core checkstopped and it’s not coming back”.</p>
+<p>Currently, linux accepts that anything fatal is fatal to itself.
+In the future, we <em>could</em> Linux survive NX checkstop, or even a core
+checkstop. The only thing stopping either of those is time and sanity of
+kernel developers (not to mention test teams).</p>
+<p>In the event of something being marked as fatal, the idea is that Linux
+will, through an OPAL call (OPAL_CEC_REBOOT2) say that a fatal platform
+error has occured that it can only deal with by having firmware gather
+debug data and reboot the box (it does a reboot_type of
+OPAL_REBOOT_PLATFORM_ERROR).</p>
+<p>This maps down to that PBEASTFIR[31]. We get this fir to trigger from
+Hostboot (via device-tree on p8 and hdat on p9), so it could be
+anything, OPAL doesn’t care.</p>
+<p>It <em>used</em> to be that Linux would just reboot the box, but this didn’t
+tell PRD (or OPAL) that it should gather debug data, and that didn’t
+help anybody in debugging anything, nor calling out a failing processor,
+and that’s why the OPAL_REBOOT_PLATFORM_ERROR reboot type was
+introduced.</p>
+<p>As such, the logic in the kernel <em>used</em> to be:</p>
+<dl class="docutils">
+<dt>if (fatal_hmi)</dt>
+<dd>reboot();</dd>
+</dl>
+<p>but as of ~2015 sometime it’s closer to this:</p>
+<dl class="docutils">
+<dt>if (fatal_hmi) {</dt>
+<dd><dl class="first docutils">
+<dt>if (opal_cec_reboot2(OPAL_REBOOT_PLATFORM_ERROR))</dt>
+<dd>print “Reboot type not supported”</dd>
+</dl>
+<p class="last">reboot();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>and with <a class="reference external" href="https://patchwork.ozlabs.org/patch/875910/">https://patchwork.ozlabs.org/patch/875910/</a>
+it’ll be panic() rather than reboot(), which makes a lot of sense and
+has me wondering why we didn’t always do that.</p>
+<p>panic() behaviour is up to system policy. Typically, for production systems,
+this is set to “reboot in 60 seconds on panic” while for developers,
+it’s likely “enter kernel debugger” (which for powerpc is xmon)… or it
+could be “try to then do kdump”. No matter what, you’re not continuing
+normal execution of your OS.</p>
+<p>But, since we ended up in a position where we were getting fatal HMIs and
+what we were gathering on that reboot cycle wasn’t enough to go on, we
+took a big hammer to the problem and disabled the
+OPAL_REBOOT_PLATFORM_ERROR call.</p>
+<p>This is currently an nvram option, so you can re-enable the xstop with:
+nvram -p ibm,skiboot –update-config opal-sw-xstop=enable</p>
+<p>I rather reluctantly merged this change as it doesn’t really make sense
+to change this for everything, and it doesn’t solve the problem of “no,
+really, a reboot needs to happen to collect FIR bits to work out why
+this thing is broken”.</p>
+<p>So, I want a better solution for GA, I’m just not 100% sure what that
+looks like yet (maybe we need a new type of HMI to tell linux
+that it was “fatal but probably the operating system’s fault” ?)</p>
+<p>One of the current problems we have is that there’s no way to
+distinguish between what is a hardware/firmware problem and what is
+caused by the OS being buggy. If we had had that from the start, we
+wouldn’t have been having any of these problems.</p>
+<p>&gt; However, I’m not clear on the details.
+&gt;    Will OPAL ever drive a system checkstop (PBEASTFIR[31]) for either
+&gt;    NPU0FIR[19] or [25] ?</p>
+<p><em>current</em> behaviour is that if there’s any bits that match:
+fatal_errors = npu2_fir &amp; ~npu2_fir_mask &amp; npu2_fir_action0 &amp;
+npu2_fir_action1;
+for any NPU, then we tell linux about the NPU HMI.</p>
+<p>(i haven’t checked what those maskes are set to by default though… but
+let’s <em>assume</em> that it does include np0fir[19] and [25])</p>
+<p><em>currently</em> we <em>always</em> tell linux it’s a RECOVERABLE HMI, so we don’t
+go down the TI path. This only became the case <em>very</em> recently though
+(skiboot v5.10-rc2) and prior to that we didn’t decode the NPU2
+checkstop reason at all, so just assumed it was fatal (and thus we <em>did</em>
+go down the TI path).</p>
+<p>So the <em>current</em> answer to your question is: no.</p>
+<p>For everything prior to skiboot v5.10-rc2, the answer is yes.</p>
+<p>I’m also not convinced that saying ‘recoverable’ is really correct… it
+smells like more of a hack to me. This is something we need to go back
+and design properly inside OPAL and Linux.</p>
+<p>&gt;    What conditions remain for which OPAL would drive checkstop / PBEASTFIR
+&gt;    [31] ?</p>
+<p>Currently? None at all.</p>
+<p>This is not what I want for GA though.</p>
+<p>&gt; Put differently, I am concerned that if we make the PRD change suggested
+&gt; above and if OPAL can drive checkstop for either of these two bits, that
+&gt; we’ll be back to where we were before 1742Ex when we had OPAL TI checkstops
+&gt; and no idea why.</p>
+<p>After the insanely long explanation above… I think the safe way to
+proceed forward on this is:</p>
+<ul class="simple">
+<li>Current skiboot does what you want, it won’t trigger PBEASTFIR[31] no
+matter what.</li>
+<li>To protect against future changes, we probably need to take note of
+this and take action in OPAL depending what route we end up going down
+with changes to OPAL to make things less hacky then they are today.</li>
+</ul>
+<p>Does that help at all?</p>
+<blockquote>
+<div>There’s two places:</div></blockquote>
+<ol class="arabic simple">
+<li>We’ll print something to the OPAL log which <em>probably</em> (not on FSP
+systems, but on OpenPOWER systems it will get there with some level of
+detail) will get to the console of the machine.</li>
+<li>The kernel will log something to the kernel log which (assuming the
+world hasn’t just stopped), will get to syslog. This may also get
+into the ‘lnx-oops’ nvram partition if we end up panic()ing.</li>
+</ol>
+<dl class="docutils">
+<dt>The kernel log looks something like:</dt>
+<dd>&lt;3&gt; Severe Hypervisor Maintenance Interrupt [Not recovered]
+&lt;3&gt; Error detail: Malfunction Alert
+&lt;3&gt; HMER: XXXXXXX
+&lt;3&gt; TFMR: XXXXXXX</dd>
+</dl>
+</div></blockquote>
+</div>
+
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+  <h4>Previous topic</h4>
+  <p class="topless"><a href="index.html"
+                        title="previous chapter">Interrupts</a></p>
+  <h4>Next topic</h4>
+  <p class="topless"><a href="../opal-api/index.html"
+                        title="next chapter">OPAL API Documentation</a></p>
+  <div role="note" aria-label="source link">
+    <h3>This Page</h3>
+    <ul class="this-page-menu">
+      <li><a href="../_sources/interrupts/hmi.rst.txt"
+            rel="nofollow">Show Source</a></li>
+    </ul>
+   </div>
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <form class="search" action="../search.html" method="get">
+      <div><input type="text" name="q" /></div>
+      <div><input type="submit" value="Go" /></div>
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="related" role="navigation" aria-label="related navigation">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="../genindex.html" title="General Index"
+             >index</a></li>
+        <li class="right" >
+          <a href="../opal-api/index.html" title="OPAL API Documentation"
+             >next</a> |</li>
+        <li class="right" >
+          <a href="index.html" title="Interrupts"
+             >previous</a> |</li>
+        <li class="nav-item nav-item-0"><a href="../index.html">skiboot v5.10-56-gee04c92cd15e-stewart-dirty-f7c5431
+ documentation</a> &#187;</li>
+          <li class="nav-item nav-item-1"><a href="index.html" >Interrupts</a> &#187;</li> 
+      </ul>
+    </div>
+    <div class="footer" role="contentinfo">
+        &#169; Copyright 2016-2017, IBM, others.
+      Created using <a href="http://sphinx-doc.org/">Sphinx</a> 1.6.6.
+    </div>
+  </body>
+</html>
